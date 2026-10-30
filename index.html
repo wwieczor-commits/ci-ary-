@@ -278,7 +278,7 @@ nav.tabs button.on{color:var(--accent)}
     <button class="btn icon" id="flipBtn" title="Przód / tył" aria-label="Przełącz kamerę">
       <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-3l-2-3H9L7 7H4a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1V8a1 1 0 0 0-1-1z"/><path d="M9 13a3 3 0 0 1 5-2.2M15 13a3 3 0 0 1-5 2.2"/><path d="M14 9v2h-2M10 17v-2h2"/></svg>
     </button>
-    <label class="btn" id="fileBtn">Film z galerii<input type="file" id="fileIn" accept="video/*" hidden></label>
+    <label class="btn" id="fileBtn">Film z galerii<input type="file" id="fileIn" accept="video/*,video/quicktime,video/mp4,.mov,.MOV,.mp4,.MP4,.m4v,.webm" hidden></label>
   </div>
   <div class="actions">
     <button class="btn rec primary" id="recBtn" disabled>Start serii</button>
@@ -594,8 +594,10 @@ $('#camBtn').onclick = () => {
 };
 $('#flipBtn').onclick = () => { facing = facing==='environment' ? 'user' : 'environment'; toast(facing==='user' ? 'Kamera przednia' : 'Kamera tylna'); if(src==='cam') startCam(); };
 
-$('#fileIn').onchange = e => {
-  const f = e.target.files[0]; if(!f) return;
+$('#fileIn').onchange = e => { const f = e.target.files[0]; e.target.value = ''; if(f) openFile(f); };
+// na komputerze film można też przeciągnąć na obraz
+['dragover','drop'].forEach(n => $('#stage').addEventListener(n, e => { e.preventDefault(); if(n==='drop'){ const f = e.dataTransfer.files[0]; if(f) openFile(f); } }));
+function openFile(f){
   stopAll();
   fileUrl = URL.createObjectURL(f); fileName = f.name;
   video.src = fileUrl; video.loop = false; video.muted = true;
@@ -607,9 +609,16 @@ $('#fileIn').onchange = e => {
     video.play().then(()=>video.pause()).catch(()=>{});
     toast('Przewiń do początku serii, ewentualnie zaznacz talerz i kliknij „Analizuj film”.', 5000);
   };
+  video.onerror = () => {
+    video.onerror = null;
+    if(src !== 'file') return;
+    const mov = /\.(mov|hevc)$/i.test(f.name);
+    toast(mov ? 'Ta przeglądarka nie odtwarza tego filmu (iPhone nagrywa w HEVC). Otwórz aplikację w Safari albo Chrome na Macu/iPhonie, albo nagrywaj w „Najbardziej zgodny” (Ustawienia → Aparat → Formaty).'
+              : 'Ta przeglądarka nie odtwarza tego formatu filmu. Spróbuj pliku MP4.', 9000);
+    stopAll(); running = false; $('#ph').style.display = '';
+  };
   video.load();
-  e.target.value = '';
-};
+}
 $('#playBtn').onclick = () => { if(video.paused){ video.play().catch(()=>{}); keepAwake(); } else video.pause(); };
 video.onplay = () => $('#playBtn').textContent='❚❚';
 video.onpause = () => $('#playBtn').textContent='▶';
