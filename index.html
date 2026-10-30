@@ -322,6 +322,7 @@ nav.tabs button.on{color:var(--accent)}
         <div class="tog"><span>Podpowiedzi głosem<small>po każdym powtórzeniu jedna najważniejsza uwaga</small></span><label class="sw"><input type="checkbox" id="voice" checked><i></i></label></div>
         <div class="tog"><span>Odliczanie 5 s przed serią<small>czas na podejście do sztangi</small></span><label class="sw"><input type="checkbox" id="countdown" checked><i></i></label></div>
         <label class="f">Średnica talerza (cm)<input type="number" id="plateD" inputmode="decimal" value="45" min="20" max="50" step="0.5"></label>
+        <div class="tog"><span>Rozmyj tło i inne osoby<small>widać tylko ćwiczącego – także na zdjęciach w raporcie</small></span><label class="sw"><input type="checkbox" id="blur" checked><i></i></label></div>
         <div class="tog"><span>Lustro<small>odbicie obrazu (przednia kamera)</small></span><label class="sw"><input type="checkbox" id="mirror"><i></i></label></div>
         <div class="tog"><span>Zamień lewą i prawą<small>gdy model pomyli strony</small></span><label class="sw"><input type="checkbox" id="swap"><i></i></label></div>
         <div class="row2">
@@ -372,6 +373,7 @@ nav.tabs button.on{color:var(--accent)}
         <li><b>Dokładnie z boku.</b> Telefon na statywie lub opartym o coś stabilnym, prostopadle do sztangi, na wysokości bioder, 3–4 m od ćwiczącego. Tor gryfu i odległość od środka stopy mają sens tylko w widoku z boku.</li>
         <li><b>Cała sylwetka w kadrze</b> – od stóp po dłonie nad głową (przy wyciskaniu żołnierskim) i cały talerz. Gdy wszystko widać, ramka obrazu robi się zielona.</li>
         <li><b>Wyciskanie leżąc:</b> telefon z boku ławki, na wysokości ławki, tak żeby widać było barki, łokcie, dłonie i biodra.</li>
+        <li><b>Inne osoby w kadrze:</b> aplikacja śledzi jedną osobę – na starcie największą (najbliżej kamery). Jeśli wybierze złą, <b>dotknij ćwiczącego na obrazie</b>. Tło i inne osoby są rozmyte (także na zdjęciach w raporcie) – można to wyłączyć w Ustawieniach.</li>
         <li>Dobre światło, mało ludzi w tle, ciemne talerze na jasnym tle (albo odwrotnie) ułatwiają śledzenie.</li>
         <li><b>Film z galerii:</b> nagraj serię aparatem (najlepiej 60 kl/s), wczytaj, przewiń do początku serii i kliknij „Analizuj film”.</li>
       </ul>
@@ -497,14 +499,15 @@ if(settings.plateD) $('#plateD').value = settings.plateD;
 if(settings.voice===false) $('#voice').checked = false;
 if(settings.countdown===false) $('#countdown').checked = false;
 if(settings.rate) $('#rate').value = settings.rate;
+if(settings.blur===false) $('#blur').checked = false;
 if(settings.ex && EX[settings.ex]) ex = settings.ex;
 settings.weights = settings.weights || {};
 function saveSettings(){
   settings = {...settings, model:modelKind, dev:devPref, smooth:$('#smooth').value, height:$('#height').value, plateD:$('#plateD').value,
-    voice:$('#voice').checked, countdown:$('#countdown').checked, rate:$('#rate').value, ex};
+    voice:$('#voice').checked, countdown:$('#countdown').checked, blur:$('#blur').checked, rate:$('#rate').value, ex};
   try{ localStorage.setItem(SET_KEY, JSON.stringify(settings)); }catch(e){}
 }
-['#height','#plateD','#voice','#countdown','#rate'].forEach(s => $(s).addEventListener('change', saveSettings));
+['#height','#plateD','#voice','#countdown','#rate','#blur'].forEach(s => $(s).addEventListener('change', saveSettings));
 $('#weight').addEventListener('change', () => { settings.weights[ex] = $('#weight').value; saveSettings(); });
 
 /* ---------- filtr One Euro (jak w BikeRc) ---------- */
@@ -535,7 +538,7 @@ async function loadModel(){
       PoseLandmarker = m.PoseLandmarker;
       fileset = await m.FilesetResolver.forVisionTasks(`${CDN}/wasm`);
     }
-    const opts = delegate => ({ baseOptions:{modelAssetPath:MODEL_URLS[modelKind], delegate}, runningMode:'VIDEO', numPoses:1,
+    const opts = delegate => ({ baseOptions:{modelAssetPath:MODEL_URLS[modelKind], delegate}, runningMode:'VIDEO', numPoses:3, outputSegmentationMasks:true,
       minPoseDetectionConfidence:.5, minPosePresenceConfidence:.5, minTrackingConfidence:.5 });
     let lm, dev = devPref;
     try{ lm = await PoseLandmarker.createFromOptions(fileset, opts(dev)); }
@@ -585,7 +588,7 @@ function stopAll(){
   if(fileUrl){ video.removeAttribute('src'); video.load(); URL.revokeObjectURL(fileUrl); fileUrl=null; }
   $('#filebar').classList.remove('on');
   $('#camBtn').textContent='Kamera'; $('#camBtn').classList.add('primary');
-  src = null; pts = null; cur = null; plateOff();
+  src = null; pts = null; cur = null; person = null; maskOk = false; plateOff();
   updateRecBtn();
 }
 $('#camBtn').onclick = () => {
@@ -687,8 +690,10 @@ function loop(){
     let ts = performance.now(); if(ts<=lastTs) ts=lastTs+1; lastTs=ts;
     let res; try{ res = landmarker.detectForVideo(video, ts); }catch(e){ console.warn(e); }
     const t = src==='cam' ? ts/1000 : video.currentTime;
-    if(res && res.landmarks && res.landmarks[0]) process(res.landmarks[0], w, h, t);
-    else { pts=null; cur=null; setup = {ok:false, msg:'Nie widzę sylwetki – stań w kadrze'}; }
+    const k = res && res.landmarks && res.landmarks.length ? pickPerson(res.landmarks, t) : -1;
+    if(k >= 0){ updateMask(res.segmentationMasks?.[k]); process(res.landmarks[k], w, h, t); }
+    else { pts=null; cur=null; maskOk=false; setup = {ok:false, msg:'Nie widzę sylwetki – stań w kadrze'}; }
+    res?.segmentationMasks?.forEach(m => { try{ m.close(); }catch(e){} });
     fpsN++;
   }
   draw(w,h);
@@ -696,6 +701,67 @@ function loop(){
   const now = performance.now();
   if(now - fpsT > 1000){ $('#fps').textContent = Math.round(fpsN*1000/(now-fpsT)) + ' fps'; fpsT=now; fpsN=0; }
   if(now - lastUi > 120){ lastUi = now; updateUI(); if(src==='file') updateFileBar(); }
+}
+
+/* ---------- wybór ćwiczącego, gdy w kadrze jest kilka osób ---------- */
+// Na starcie bierzemy największą sylwetkę (najbliżej kamery), potem trzymamy się tej samej osoby.
+// Dotknięcie osoby na obrazie wybiera ją ręcznie.
+let person = null; // {x, y, t} – środek bioder w ułamkach obrazu
+function pickPerson(L, t){
+  const info = L.map(lm => {
+    const vis = lm.filter(p => (p.visibility ?? 1) > .4);
+    const ys = vis.map(p=>p.y), xs = vis.map(p=>p.x);
+    return {x:(lm[23].x+lm[24].x)/2, y:(lm[23].y+lm[24].y)/2, size: ys.length ? (Math.max(...ys)-Math.min(...ys)) * (1 + .3*(Math.max(...xs)-Math.min(...xs))) : 0};
+  });
+  let k = -1;
+  if(person && (person.pick || t - person.t < 1.5 || t < person.t)){
+    let bd = Infinity;
+    info.forEach((p,i) => { const d = Math.hypot(p.x-person.x, p.y-person.y); if(d < bd){ bd = d; k = i; } });
+    if(bd > (person.pick ? .35 : .2)) k = -1;
+  }
+  // zgubiona osoba: przez 1 s (wybrana ręcznie: 1,5 s) czekamy, potem bierzemy największą sylwetkę
+  if(k < 0 && !(person && t >= person.t && t - person.t < (person.pick ? 1.5 : 1))) info.forEach((p,i) => { if(k < 0 || p.size > info[k].size) k = i; });
+  if(k >= 0) person = {x:info[k].x, y:info[k].y, t, pick: person?.pick && Math.hypot(info[k].x-person.x, info[k].y-person.y) < .35};
+  return k;
+}
+
+/* ---------- maska ćwiczącego (do rozmycia tła) ---------- */
+const maskCv = document.createElement('canvas'), mctx = maskCv.getContext('2d');
+const blurCv = document.createElement('canvas'), bctx = blurCv.getContext('2d');
+const personCv = document.createElement('canvas'), pctx = personCv.getContext('2d');
+let maskOk = false, maskImg = null;
+function updateMask(m){
+  maskOk = false;
+  if(!m || !$('#blur').checked) return;
+  try{
+    const W = m.width, H = m.height, a = m.getAsFloat32Array(), st = 4;
+    const mw = Math.ceil(W/st), mh = Math.ceil(H/st);
+    if(maskCv.width !== mw || maskCv.height !== mh){ maskCv.width = mw; maskCv.height = mh; maskImg = mctx.createImageData(mw, mh); }
+    const d = maskImg.data;
+    for(let y=0; y<mh; y++) for(let x=0; x<mw; x++){
+      const v = a[(y*st)*W + x*st], o = (y*mw + x)*4;
+      d[o] = d[o+1] = d[o+2] = 255; d[o+3] = v > .5 ? 255 : v > .2 ? (v-.2)/.3*255 : 0;
+    }
+    mctx.putImageData(maskImg, 0, 0);
+    maskOk = true;
+  }catch(e){ console.warn(e); }
+}
+function drawFrame(w, h){
+  // tło: obraz zmniejszony i powiększony (mocne rozmycie, działa też w starszym Safari)
+  const bw = Math.max(16, Math.round(w/28)), bh = Math.max(9, Math.round(h/28));
+  if(blurCv.width !== bw){ blurCv.width = bw; blurCv.height = bh; }
+  bctx.drawImage(video, 0, 0, bw, bh);
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(blurCv, 0, 0, w, h);
+  ctx.fillStyle = 'rgba(34,33,33,.25)'; ctx.fillRect(0, 0, w, h);
+  // ćwiczący ostry: obraz wycięty maską (z marginesem, żeby gryf i talerz też były widoczne)
+  if(personCv.width !== w || personCv.height !== h){ personCv.width = w; personCv.height = h; }
+  pctx.globalCompositeOperation = 'source-over'; pctx.clearRect(0, 0, w, h);
+  pctx.drawImage(video, 0, 0, w, h);
+  pctx.globalCompositeOperation = 'destination-in';
+  pctx.drawImage(maskCv, 0, 0, w, h);
+  if(plate.on){ pctx.globalCompositeOperation = 'source-over'; pctx.save(); pctx.beginPath(); pctx.arc(plate.cx, plate.cy, plate.r*1.15, 0, 7); pctx.clip(); pctx.drawImage(video, 0, 0, w, h); pctx.restore(); }
+  ctx.drawImage(personCv, 0, 0);
 }
 
 /* ---------- punkty → cechy klatki ---------- */
@@ -1143,10 +1209,17 @@ $('#plateBtn').onclick = () => {
   toast('Dotknij środka talerza na obrazie.', 4000);
 };
 canvas.addEventListener('click', e => {
-  if(!plate.mode) return;
   const r = canvas.getBoundingClientRect();
   let x = (e.clientX - r.left) * canvas.width / r.width, y = (e.clientY - r.top) * canvas.height / r.height;
   if($('#mirror').checked) x = canvas.width - x;
+  if(!plate.mode){
+    // dotknięcie osoby = śledź tę osobę
+    if(!src) return;
+    person = {x: x/canvas.width, y: y/canvas.height, t: lastPoseT(), pick: true};
+    if(src==='file' && video.paused){ lastVidTime = -1; }
+    toast('Śledzę wybraną osobę.');
+    return;
+  }
   if(plate.mode === 1){ plate.tx = x; plate.ty = y; plate.mode = 2; toast('Teraz dotknij krawędzi talerza.', 4000); return; }
   if(plate.mode === 2){
     plate.mode = 0;
@@ -1158,9 +1231,12 @@ canvas.addEventListener('click', e => {
 /* =========================================================
    RYSOWANIE
    ========================================================= */
+function lastPoseT(){ return src==='cam' ? performance.now()/1000 : video.currentTime; }
 function draw(w,h){
   const mirror = $('#mirror').checked;
-  ctx.save(); if(mirror){ ctx.translate(w,0); ctx.scale(-1,1); } ctx.drawImage(video,0,0,w,h); ctx.restore();
+  ctx.save(); if(mirror){ ctx.translate(w,0); ctx.scale(-1,1); }
+  if(maskOk && $('#blur').checked) drawFrame(w, h); else ctx.drawImage(video,0,0,w,h);
+  ctx.restore();
   const MX = x => mirror ? w - x : x;
   const sc = Math.min(w,h)/720, lw = 4*sc, fs = Math.round(20*sc), font = css('--font');
   const acc = css('--accent'), okC = css('--ok'), warnC = css('--warn'), badC = css('--bad');
@@ -1447,7 +1523,7 @@ if(!window.isSecureContext) setTimeout(()=>toast('Strona otwarta bez https – k
 
 /* hak do testów automatycznych (?test) */
 if(new URLSearchParams(location.search).has('test')) window.__sila = {
-  process, features, analyzeRep, segmentAll, summarize, buildSet, renderReport, reportHTML, scaleOf, RepFSM,
+  process, features, analyzeRep, pickPerson, resetPerson(){ person = null; }, segmentAll, summarize, buildSet, renderReport, reportHTML, scaleOf, RepFSM,
   get samples(){ return samples; }, get liveReps(){ return liveReps; },
   begin(e){ setEx(e); resetSet(); recording = true; countdownEnd = 0; recStart = 0; src = 'file'; },
   feed(lm, t){ process(lm, 1280, 720, t); },
